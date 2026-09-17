@@ -12,6 +12,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "qwen:diagram": "node scripts/qwen-diagram.mjs",
     "generate:viewer": "node ../scripts/generate-viewer.mjs",
     "check:viewer": "node ../scripts/generate-viewer.mjs --check",
     "generate:brand-marks": "node scripts/generate-brand-marks.mjs",
