@@ -1,0 +1,207 @@
+# Local Qwen + Archify
+
+Use your local Qwen model to inspect source code, generate an Archify JSON specification, validate it, and render a standalone HTML diagram.
+
+This repo now includes `archify/scripts/qwen-diagram.mjs`, which talks to an OpenAI-compatible endpoint such as `llama.cpp`.
+
+## Defaults for your local setup
+
+The script defaults to:
+
+- Base URL: `http://127.0.0.1:8081/v1`
+- Model alias: `qwen38-code`
+- Diagram quality: `showcase`
+- Source limit: 80 files / 180,000 source characters
+
+Those defaults match a llama.cpp server exposing your Qwen model as `qwen38-code`.
+
+Verify the server first from PowerShell:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8081/v1/models
+```
+
+You should see `qwen38-code` in the returned models.
+
+## Clone and install
+
+```powershell
+Set-Location C:\AI
+git clone https://github.com/rkatepally/archify.git
+Set-Location C:\AI\archify\archify
+npm install
+```
+
+If you already cloned the repo:
+
+```powershell
+Set-Location C:\AI\archify
+git pull
+git checkout local-qwen-diagrams
+Set-Location .\archify
+npm install
+```
+
+## 1. Generate an architecture diagram from a repository
+
+Point `--repo` at the codebase you want Qwen to inspect:
+
+```powershell
+Set-Location C:\AI\archify\archify
+
+npm run qwen:diagram -- `
+  --repo C:\AI\qanda-yt `
+  --type architecture `
+  --prompt "Show the application entry points, API layer, LLM integration, transcript/caption flow, storage and external dependencies. Only include components supported by the code." `
+  --spec C:\AI\qanda-yt-architecture.json `
+  --output C:\AI\qanda-yt-architecture.html
+```
+
+Result:
+
+- `C:\AI\qanda-yt-architecture.json` - Qwen-generated Archify specification
+- `C:\AI\qanda-yt-architecture.html` - validated standalone diagram
+
+Open the HTML file in a browser.
+
+## 2. Point Qwen at specific files
+
+Use `--files` when you know the important code paths. Paths are relative to `--repo`.
+
+```powershell
+npm run qwen:diagram -- `
+  --repo C:\AI\qanda-yt `
+  --files "app.py,src\youtube.py,src\llm.py,src\quiz.py" `
+  --type architecture `
+  --prompt "Explain how a YouTube URL becomes captions, LLM context and a generated quiz. Include source-file evidence on diagram components where the schema supports it." `
+  --output C:\AI\qanda-yt-focused.html
+```
+
+This is the best mode when you want the generated diagram to stay tightly grounded in code rather than scanning the whole repository.
+
+## 3. Generate a sequence diagram for one code path
+
+Example: trace an API request through code.
+
+```powershell
+npm run qwen:diagram -- `
+  --repo C:\AI\my-app `
+  --files "src\api.ts,src\jobs.ts,src\worker.ts,src\db.ts" `
+  --type sequence `
+  --prompt "Trace POST /jobs from the HTTP request through validation, persistence, queueing, worker execution and final status update. Preserve actual function names and protocols from the code." `
+  --output C:\AI\job-request-sequence.html
+```
+
+## 4. Generate a data-flow diagram
+
+```powershell
+npm run qwen:diagram -- `
+  --repo "Z:\Tactical Review Project" `
+  --type dataflow `
+  --prompt "Show how source documents move through ingestion, embeddings, concepts, wiki entries, entities and relations. Use only storage systems and processing stages visible in the repository." `
+  --output "Z:\Tactical Review Project\knowledge-flow.html"
+```
+
+## 5. Generate a workflow diagram
+
+```powershell
+npm run qwen:diagram -- `
+  --repo C:\AI\powerbi-dax-review `
+  --type workflow `
+  --prompt "Show the end-to-end DAX review workflow from selecting model files through analysis, findings, recommendations and output artifacts. Show decision points only when they exist in code." `
+  --output C:\AI\powerbi-dax-review-workflow.html
+```
+
+## 6. Generate a lifecycle diagram
+
+```powershell
+npm run qwen:diagram -- `
+  --repo C:\AI\my-agent `
+  --files "src\agent.ts,src\state.ts,src\retry.ts" `
+  --type lifecycle `
+  --prompt "Show the agent run lifecycle including queued, running, tool-call, retry, success and failure states, but only if those states are implemented in code." `
+  --output C:\AI\agent-lifecycle.html
+```
+
+## Change the Qwen endpoint or model
+
+Command-line override:
+
+```powershell
+npm run qwen:diagram -- `
+  --repo C:\AI\my-app `
+  --type architecture `
+  --prompt "Create a code-grounded architecture diagram" `
+  --base-url http://127.0.0.1:8081/v1 `
+  --model qwen38-code
+```
+
+Or set environment variables once in the current PowerShell session:
+
+```powershell
+$env:QWEN_BASE_URL = "http://127.0.0.1:8081/v1"
+$env:QWEN_MODEL = "qwen38-code"
+```
+
+## Control context size
+
+For a large repository, reduce the source supplied to Qwen:
+
+```powershell
+npm run qwen:diagram -- `
+  --repo C:\AI\large-repo `
+  --type architecture `
+  --prompt "Show the main service architecture" `
+  --max-files 40 `
+  --max-bytes 120000
+```
+
+For the highest-quality result, prefer `--files` over simply increasing context size. Give Qwen the entry points, configuration, service clients, data-access code and orchestration files that actually establish the architecture.
+
+## Generate JSON without rendering
+
+Useful while refining prompts:
+
+```powershell
+npm run qwen:diagram -- `
+  --repo C:\AI\my-app `
+  --type architecture `
+  --prompt "Show the core runtime architecture" `
+  --no-deliver
+```
+
+The script still runs Archify validation. It skips only final HTML delivery.
+
+## Recommended prompt pattern
+
+Use prompts like this:
+
+```text
+Create a code-grounded architecture diagram.
+
+Focus on:
+- application entry points
+- major runtime components
+- LLM/model calls
+- databases, files, queues and caches
+- external APIs
+- important protocols or request flows
+
+Rules:
+- use exact code identifiers where useful
+- do not invent components
+- collapse utility/helper files into their owning component
+- keep the main diagram under 12 primary nodes
+- attach repository-relative source paths where the Archify schema supports evidence
+```
+
+## How the integration works
+
+`qwen-diagram.mjs` performs four steps:
+
+1. Reads either selected files (`--files`) or a bounded set of source files under `--repo`.
+2. Loads the matching Archify JSON schema plus one existing example.
+3. Sends the code, schema and your prompt to local Qwen through `/v1/chat/completions`.
+4. Writes the JSON, runs `archify validate`, then runs `archify deliver` to create the standalone HTML.
+
+The existing Archify renderer remains unchanged. Qwen is used only as the code-understanding and JSON-authoring layer.
