@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 
 const DEFAULT_BASE_URL = process.env.QWEN_BASE_URL || 'http://127.0.0.1:8081/v1';
 const DEFAULT_MODEL = process.env.QWEN_MODEL || 'qwen38-code';
@@ -137,6 +137,71 @@ async function collectSources(repo, requestedFiles, maxFiles, maxBytes) {
   return { root, blocks, fileCount: blocks.length, bytes: used };
 }
 
+function runCapture(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { cwd, encoding: 'utf8', windowsHide: true }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = (stderr || error.message || '').trim();
+        reject(new Error(detail || `${command} ${args.join(' ')} failed`));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+  });
+}
+
+function normalizeRepositoryUrl(origin) {
+  const value = origin.trim();
+  const githubSsh = value.match(/^git@github\.com:(.+?)(?:\.git)?$/i);
+  if (githubSsh) return { url: `https://github.com/${githubSsh[1].replace(/\.git$/i, '')}`, provider: 'github' };
+
+  const giteeSsh = value.match(/^git@gitee\.com:(.+?)(?:\.git)?$/i);
+  if (giteeSsh) return { url: `https://gitee.com/${giteeSsh[1].replace(/\.git$/i, '')}`, provider: 'gitee' };
+
+  if (/^https?:\/\/github\.com\//i.test(value)) {
+    return { url: value.replace(/\.git\/?$/i, '').replace(/\/$/, ''), provider: 'github' };
+  }
+  if (/^https?:\/\/gitee\.com\//i.test(value)) {
+    return { url: value.replace(/\.git\/?$/i, '').replace(/\/$/, ''), provider: 'gitee' };
+  }
+
+  if (/^(?:https?:\/\/|ssh:\/\/|git@[^:]+:)/i.test(value)) {
+    return { url: value, link_mode: 'local-only' };
+  }
+
+  throw new Error(`Unsupported git remote.origin.url for Archify source evidence: ${value}`);
+}
+
+async function readRepositoryEvidence(repo) {
+  let revision;
+  let origin;
+  try {
+    revision = await runCapture('git', ['rev-parse', 'HEAD'], repo);
+    origin = await runCapture('git', ['config', '--get', 'remote.origin.url'], repo);
+  } catch (error) {
+    throw new Error(
+      `Architecture diagrams with source evidence require --repo to be a Git checkout with remote.origin.url. ` +
+      `Repository: ${repo}\nGit error: ${error.message}`
+    );
+  }
+
+  if (!/^[a-f0-9]{40}$/i.test(revision)) {
+    throw new Error(`Expected a full 40-character Git revision, received: ${revision}`);
+  }
+  if (!origin) {
+    throw new Error('Git remote.origin.url is empty. Add an origin remote before generating an architecture diagram with source evidence.');
+  }
+
+  const identity = normalizeRepositoryUrl(origin);
+  let dirty = false;
+  try { dirty = Boolean(await runCapture('git', ['status', '--porcelain'], repo)); } catch { /* best-effort warning only */ }
+
+  return {
+    meta: { ...identity, revision },
+    dirty
+  };
+}
+
 async function readArchifyContext(type) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const archifyRoot = path.resolve(here, '..');
@@ -208,11 +273,21 @@ function runNode(args, cwd) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sources = await collectSources(args.repo, args.files, args.maxFiles, args.maxBytes);
+  const repositoryEvidence = args.type === 'architecture' ? await readRepositoryEvidence(sources.root) : null;
   const ctx = await readArchifyContext(args.type);
-  const prompt = `Create an Archify ${args.type} diagram for this codebase.\n\nUSER GOAL:\n${args.prompt}\n\nRULES:\n- Return valid JSON only.\n- Use fresh IDs and labels; the example is shape guidance only.\n- Do not invent services, protocols, databases, queues, or flows not evidenced by code.\n- Prefer repository-relative source paths in source evidence.\n- Keep the diagram readable and concise.\n\nTYPE SCHEMA:\n${ctx.schema}\n\nCOMMON SCHEMA:\n${ctx.common}\n\nREFERENCE EXAMPLE (${ctx.exampleName}):\n${ctx.example}\n\nSOURCE FILES (${sources.fileCount} files, ${sources.bytes} characters):\n${sources.blocks.join('\n\n')}`;
+  const repositoryRule = repositoryEvidence
+    ? `\n- Set meta.repository exactly to this verified value: ${JSON.stringify(repositoryEvidence.meta)}.\n- Attach component sources only to repository-relative paths that actually appear in the supplied source files.`
+    : '';
+  const prompt = `Create an Archify ${args.type} diagram for this codebase.\n\nUSER GOAL:\n${args.prompt}\n\nRULES:\n- Return valid JSON only.\n- Use fresh IDs and labels; the example is shape guidance only.\n- Do not invent services, protocols, databases, queues, or flows not evidenced by code.\n- Prefer repository-relative source paths in source evidence.\n- Keep the diagram readable and concise.${repositoryRule}\n\nTYPE SCHEMA:\n${ctx.schema}\n\nCOMMON SCHEMA:\n${ctx.common}\n\nREFERENCE EXAMPLE (${ctx.exampleName}):\n${ctx.example}\n\nSOURCE FILES (${sources.fileCount} files, ${sources.bytes} characters):\n${sources.blocks.join('\n\n')}`;
 
   console.log(`Calling ${args.model} at ${args.baseUrl}...`);
   console.log(`Supplying ${sources.fileCount} files (${sources.bytes} characters) from ${sources.root}`);
+  if (repositoryEvidence) {
+    console.log(`Repository evidence: ${repositoryEvidence.meta.url} @ ${repositoryEvidence.meta.revision}`);
+    if (repositoryEvidence.dirty) {
+      console.warn('WARNING: The target repository has uncommitted changes. Source links are pinned to HEAD, while Qwen reads the current working tree.');
+    }
+  }
   const raw = await callQwen(args.baseUrl, args.model, prompt);
   const jsonText = stripCodeFence(raw);
   let spec;
@@ -220,12 +295,18 @@ async function main() {
     await fs.writeFile(`${args.spec}.qwen-response.txt`, raw, 'utf8');
     throw new Error(`Qwen response was not valid JSON. Raw response saved to ${args.spec}.qwen-response.txt\n${error.message}`);
   }
+  if (repositoryEvidence) {
+    spec.meta ||= {};
+    spec.meta.repository = repositoryEvidence.meta;
+  }
+
   await fs.writeFile(args.spec, JSON.stringify(spec, null, 2) + '\n', 'utf8');
   console.log(`Wrote ${args.spec}`);
 
-  await runNode(['bin/archify.mjs', 'validate', args.type, path.resolve(args.spec), '--quality', 'showcase', '--json'], ctx.archifyRoot);
+  const repoRootArgs = repositoryEvidence ? ['--repo-root', sources.root] : [];
+  await runNode(['bin/archify.mjs', 'validate', args.type, path.resolve(args.spec), '--quality', 'showcase', '--json', ...repoRootArgs], ctx.archifyRoot);
   if (args.deliver) {
-    await runNode(['bin/archify.mjs', 'deliver', args.type, path.resolve(args.spec), path.resolve(args.output), '--quality', 'showcase', '--json'], ctx.archifyRoot);
+    await runNode(['bin/archify.mjs', 'deliver', args.type, path.resolve(args.spec), path.resolve(args.output), '--quality', 'showcase', '--json', ...repoRootArgs], ctx.archifyRoot);
     console.log(`Wrote ${args.output}`);
   }
 }
