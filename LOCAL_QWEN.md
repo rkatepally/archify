@@ -237,3 +237,16 @@ git rev-parse HEAD
 The revision should be a 40-character commit SHA. The Qwen driver uses these values automatically; you do not need to add `meta.repository` by hand.
 
 If the target repository has uncommitted changes, the command prints a warning because Qwen reads the working tree while Archify source links are pinned to the current `HEAD` commit.
+
+
+### Invalid source line evidence
+
+If Qwen names a real file but invents a line number that does not exist at the pinned revision, older versions fail with diagnostics such as:
+
+```text
+requestedLine: 50
+lineCount: 12
+use a line range that exists at the pinned revision
+```
+
+The Qwen driver now verifies architecture `components[].sources` against the pinned Git commit before Archify validation. Invalid line/end-line values are removed and the valid file-level `path` evidence is retained. Source paths that do not exist at the pinned revision are dropped instead of being passed to Archify.
