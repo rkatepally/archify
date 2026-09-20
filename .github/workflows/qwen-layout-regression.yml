@@ -12,7 +12,7 @@ on:
       - 'archify/package.json'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   qwen-layout:
@@ -42,17 +42,3 @@ jobs:
           path: /tmp/archify-fresh.zip
           if-no-files-found: error
           retention-days: 1
-      - name: Commit deterministic package candidate
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          if cmp -s /tmp/archify-fresh.zip archify.zip; then
-            echo "archify.zip is already fresh"
-            exit 0
-          fi
-          cp /tmp/archify-fresh.zip archify.zip
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add archify.zip
-          git commit -m "Refresh deterministic Archify package"
-          git push origin HEAD:qwen-global-layout-stabilizer
