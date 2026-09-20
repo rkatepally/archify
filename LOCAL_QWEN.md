@@ -11,7 +11,7 @@ The script defaults to:
 - Base URL: `http://127.0.0.1:8081/v1`
 - Model alias: `qwen38-code`
 - Diagram quality: `showcase`
-- Source limit: 80 files / 180,000 source characters
+- Source limit: 40 files / 100,000 source characters (safer default for a 64K local context)
 
 Those defaults match a llama.cpp server exposing your Qwen model as `qwen38-code`.
 
@@ -250,3 +250,18 @@ use a line range that exists at the pinned revision
 ```
 
 The Qwen driver now verifies architecture `components[].sources` against the pinned Git commit before Archify validation. Invalid line/end-line values are removed and the valid file-level `path` evidence is retained. Source paths that do not exist at the pinned revision are dropped instead of being passed to Archify.
+
+
+## Automatic layout repair
+
+Architecture generation now performs up to three deterministic validation-repair rounds for connection-label overlap diagnostics. When Archify reports a concrete suggested `labelAt [x,y]` position, the Qwen driver applies that exact validator suggestion, rewrites the JSON specification, and validates again before stopping.
+
+Typical console output:
+
+```text
+Layout repair: moved label "Cards & MCQs" to [890, 414].
+Layout repair: moved label "Persist State" to [780, 414].
+Layout auto-repair round 1: applied 2 fix(es), revalidating...
+```
+
+The repair changes geometry only; it does not change component names, source evidence, or architecture semantics. Diagnostics without a deterministic validator-supplied position are still reported rather than guessed.
