@@ -62,7 +62,9 @@ test('stabilizer is deterministic and idempotent', () => {
   stabilizeArchitectureLayout(second);
   assert.deepEqual(first, second);
   const firstJson = JSON.stringify(first);
-  stabilizeArchitectureLayout(first);
+  const secondPass = stabilizeArchitectureLayout(first);
+  assert.equal(secondPass.changed, false);
+  assert.equal(secondPass.reason, 'already-stable');
   assert.equal(JSON.stringify(first), firstJson);
 });
 
