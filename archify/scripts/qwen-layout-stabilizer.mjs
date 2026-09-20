@@ -385,9 +385,11 @@ function stabilizeArchitectureLayoutMutable(spec) {
 
 export function stabilizeArchitectureLayout(spec) {
   if (!spec || typeof spec !== 'object') return { changed: false, reason: 'not-architecture' };
+  const before = JSON.stringify(spec);
   const working = structuredClone(spec);
   const result = stabilizeArchitectureLayoutMutable(working);
   if (!result.changed) return result;
+  if (JSON.stringify(working) === before) return { ...result, changed: false, reason: 'already-stable' };
   for (const key of Object.keys(spec)) delete spec[key];
   Object.assign(spec, working);
   return result;
