@@ -348,7 +348,7 @@ function placeLabels(connections, selected, boxes) {
   return true;
 }
 
-export function stabilizeArchitectureLayout(spec) {
+function stabilizeArchitectureLayoutMutable(spec) {
   if (!spec || spec.diagram_type !== 'architecture') return { changed: false, reason: 'not-architecture' };
   const components = asArray(spec.components);
   const connections = asArray(spec.connections);
@@ -380,6 +380,16 @@ export function stabilizeArchitectureLayout(spec) {
   if (!placeLabels(connections, selected, boxes)) return { changed: false, reason: 'no-label-layout' };
   if (Array.isArray(spec.meta?.viewBox)) delete spec.meta.viewBox;
   return { changed: true, reason: 'stabilized', routed: connections.length };
+}
+
+export function stabilizeArchitectureLayout(spec) {
+  if (!spec || typeof spec !== 'object') return { changed: false, reason: 'not-architecture' };
+  const working = structuredClone(spec);
+  const result = stabilizeArchitectureLayoutMutable(working);
+  if (!result.changed) return result;
+  for (const key of Object.keys(spec)) delete spec[key];
+  Object.assign(spec, working);
+  return result;
 }
 
 export function inspectArchitectureGeometry(spec) {
