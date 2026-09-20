@@ -202,6 +202,94 @@ async function readRepositoryEvidence(repo) {
   };
 }
 
+function runGitShow(repo, revision, relPath) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'git',
+      ['show', `${revision}:${relPath}`],
+      { cwd: repo, encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          const detail = (stderr || error.message || '').trim();
+          reject(new Error(detail || `git show failed for ${relPath}`));
+          return;
+        }
+        resolve(stdout);
+      }
+    );
+  });
+}
+
+function pinnedLineCount(text) {
+  if (!text) return 0;
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const parts = normalized.split('\n');
+  if (parts.at(-1) === '') parts.pop();
+  return parts.length;
+}
+
+function normalizeEvidencePath(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replaceAll('\\', '/').replace(/^\.\//, '');
+  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) return null;
+  const parts = normalized.split('/');
+  if (parts.some((part) => part === '..' || part === '')) return null;
+  return normalized;
+}
+
+async function sanitizeArchitectureEvidence(spec, repo, revision) {
+  if (!Array.isArray(spec?.components)) return { repaired: 0, dropped: 0 };
+  let repaired = 0;
+  let dropped = 0;
+
+  for (const component of spec.components) {
+    if (!Array.isArray(component?.sources)) continue;
+    const verified = [];
+
+    for (const source of component.sources) {
+      const relPath = normalizeEvidencePath(source?.path);
+      if (!relPath) {
+        dropped += 1;
+        console.warn(`Evidence repair: dropped invalid source path on component ${component.id || component.label || '<unknown>'}`);
+        continue;
+      }
+
+      let pinnedText;
+      try {
+        pinnedText = await runGitShow(repo, revision, relPath);
+      } catch {
+        dropped += 1;
+        console.warn(`Evidence repair: dropped ${relPath} from ${component.id || component.label || '<unknown>'}; file is not present at pinned revision ${revision.slice(0, 12)}`);
+        continue;
+      }
+
+      const clean = { ...source, path: relPath };
+      const lineCount = pinnedLineCount(pinnedText);
+      const lineValid = Number.isInteger(clean.line) && clean.line >= 1 && clean.line <= lineCount;
+      if (clean.line !== undefined && !lineValid) {
+        console.warn(`Evidence repair: ${component.id || component.label || '<unknown>'} ${relPath} requested line ${clean.line}, but pinned file has ${lineCount} lines; keeping file-level evidence instead.`);
+        delete clean.line;
+        delete clean.end_line;
+        repaired += 1;
+      } else if (clean.line === undefined && clean.end_line !== undefined) {
+        delete clean.end_line;
+        repaired += 1;
+      } else if (clean.end_line !== undefined && (!Number.isInteger(clean.end_line) || clean.end_line < clean.line || clean.end_line > lineCount)) {
+        console.warn(`Evidence repair: removed invalid end_line ${clean.end_line} for ${relPath}; pinned file has ${lineCount} lines.`);
+        delete clean.end_line;
+        repaired += 1;
+      }
+
+      verified.push(clean);
+    }
+
+    if (verified.length) component.sources = verified.slice(0, 3);
+    else delete component.sources;
+  }
+
+  return { repaired, dropped };
+}
+
 async function readArchifyContext(type) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const archifyRoot = path.resolve(here, '..');
@@ -276,7 +364,7 @@ async function main() {
   const repositoryEvidence = args.type === 'architecture' ? await readRepositoryEvidence(sources.root) : null;
   const ctx = await readArchifyContext(args.type);
   const repositoryRule = repositoryEvidence
-    ? `\n- Set meta.repository exactly to this verified value: ${JSON.stringify(repositoryEvidence.meta)}.\n- Attach component sources only to repository-relative paths that actually appear in the supplied source files.`
+    ? `\n- Set meta.repository exactly to this verified value: ${JSON.stringify(repositoryEvidence.meta)}.\n- Attach component sources only to repository-relative paths that actually appear in the supplied source files.\n- Prefer file-level source evidence with only "path". Do not guess "line" or "end_line"; include line numbers only when they are explicitly known from the supplied evidence.`
     : '';
   const prompt = `Create an Archify ${args.type} diagram for this codebase.\n\nUSER GOAL:\n${args.prompt}\n\nRULES:\n- Return valid JSON only.\n- Use fresh IDs and labels; the example is shape guidance only.\n- Do not invent services, protocols, databases, queues, or flows not evidenced by code.\n- Prefer repository-relative source paths in source evidence.\n- Keep the diagram readable and concise.${repositoryRule}\n\nTYPE SCHEMA:\n${ctx.schema}\n\nCOMMON SCHEMA:\n${ctx.common}\n\nREFERENCE EXAMPLE (${ctx.exampleName}):\n${ctx.example}\n\nSOURCE FILES (${sources.fileCount} files, ${sources.bytes} characters):\n${sources.blocks.join('\n\n')}`;
 
@@ -298,6 +386,14 @@ async function main() {
   if (repositoryEvidence) {
     spec.meta ||= {};
     spec.meta.repository = repositoryEvidence.meta;
+    const evidenceResult = await sanitizeArchitectureEvidence(
+      spec,
+      sources.root,
+      repositoryEvidence.meta.revision
+    );
+    if (evidenceResult.repaired || evidenceResult.dropped) {
+      console.log(`Repository evidence normalized: ${evidenceResult.repaired} repaired, ${evidenceResult.dropped} dropped.`);
+    }
   }
 
   await fs.writeFile(args.spec, JSON.stringify(spec, null, 2) + '\n', 'utf8');
