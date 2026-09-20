@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
+import { stabilizeArchitectureLayout } from './qwen-layout-stabilizer.mjs';
 
 const DEFAULT_BASE_URL = process.env.QWEN_BASE_URL || 'http://127.0.0.1:8081/v1';
 const DEFAULT_MODEL = process.env.QWEN_MODEL || 'qwen38-code';
@@ -939,6 +940,15 @@ async function repairExistingSpec(args) {
     }
   }
 
+  if (args.type === 'architecture') {
+    const layoutResult = stabilizeArchitectureLayout(spec);
+    if (layoutResult.changed) {
+      console.log(`Global architecture layout stabilized: ${layoutResult.routed} connections routed deterministically.`);
+    } else {
+      console.warn(`Global architecture layout stabilizer skipped: ${layoutResult.reason}. Validator repair fallback remains enabled.`);
+    }
+  }
+
   await fs.writeFile(args.spec, JSON.stringify(spec, null, 2) + '\n', 'utf8');
   console.log(`Repairing existing spec ${args.spec} without calling Qwen.`);
 
@@ -997,6 +1007,15 @@ async function main() {
     );
     if (evidenceResult.repaired || evidenceResult.dropped) {
       console.log(`Repository evidence normalized: ${evidenceResult.repaired} repaired, ${evidenceResult.dropped} dropped.`);
+    }
+  }
+
+  if (args.type === 'architecture') {
+    const layoutResult = stabilizeArchitectureLayout(spec);
+    if (layoutResult.changed) {
+      console.log(`Global architecture layout stabilized: ${layoutResult.routed} connections routed deterministically.`);
+    } else {
+      console.warn(`Global architecture layout stabilizer skipped: ${layoutResult.reason}. Validator repair fallback remains enabled.`);
     }
   }
 

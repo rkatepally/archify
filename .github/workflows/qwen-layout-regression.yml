@@ -1,0 +1,44 @@
+name: Qwen Layout Regression
+
+on:
+  push:
+    branches:
+      - qwen-global-layout-stabilizer
+  pull_request:
+    paths:
+      - 'archify/scripts/qwen-diagram.mjs'
+      - 'archify/scripts/qwen-layout-stabilizer.mjs'
+      - 'archify/test/qwen-layout-stabilizer*.mjs'
+      - 'archify/package.json'
+
+permissions:
+  contents: read
+
+jobs:
+  qwen-layout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: archify/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: archify
+      - name: Archify doctor
+        run: node bin/archify.mjs doctor
+        working-directory: archify
+      - name: Qwen layout unit and integration tests
+        run: npm run test:qwen-layout
+        working-directory: archify
+      - name: Build deterministic package candidate
+        run: scripts/build-zip.sh /tmp/archify-fresh.zip
+      - name: Upload deterministic package candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: archify-fresh-zip
+          path: /tmp/archify-fresh.zip
+          if-no-files-found: error
+          retention-days: 1
