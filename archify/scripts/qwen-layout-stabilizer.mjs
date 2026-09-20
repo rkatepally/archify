@@ -327,6 +327,7 @@ function placeLabels(connections, selected, boxes) {
     for (const point of candidateLabelPoints(routed)) {
       const rect = labelRect(connection.label, point);
       if ([...boxes.values()].some((box) => rectsOverlap(rect, box, -2))) continue;
+      if (placed.some((entry) => rectsOverlap(rect, entry.rect, 2))) continue;
       let clear = true;
       for (const other of connections) {
         if (other.id === connection.id) continue;
@@ -427,6 +428,13 @@ export function inspectArchitectureGeometry(spec) {
       }
     }
     labelRects.push({ connection, rect });
+  }
+  for (let i = 0; i < labelRects.length; i += 1) {
+    for (let j = i + 1; j < labelRects.length; j += 1) {
+      if (rectsOverlap(labelRects[i].rect, labelRects[j].rect, 2)) {
+        issues.push({ code: 'label-label', left: labelRects[i].connection.id, right: labelRects[j].connection.id });
+      }
+    }
   }
   return { ok: issues.length === 0, issues, paths: Object.fromEntries([...paths]) };
 }
