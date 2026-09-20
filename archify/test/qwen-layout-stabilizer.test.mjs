@@ -102,3 +102,14 @@ test('unsupported grid layout is skipped rather than corrupted', () => {
   assert.equal(result.reason, 'unsupported-layout');
   assert.equal(JSON.stringify(spec), before);
 });
+
+
+test('failed stabilization is atomic and leaves the source document unchanged', () => {
+  const spec = fixture();
+  spec.connections.push({ id: 'broken', from: 'missing_component', to: 'local_storage', label: 'broken' });
+  const before = JSON.stringify(spec);
+  const result = stabilizeArchitectureLayout(spec);
+  assert.equal(result.changed, false);
+  assert.equal(result.reason, 'unknown-endpoint');
+  assert.equal(JSON.stringify(spec), before);
+});
