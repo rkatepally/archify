@@ -34,12 +34,14 @@ Options:
   --model <name>         Model alias (default: ${DEFAULT_MODEL})
   --max-files <n>        Max source files supplied to Qwen (default: ${DEFAULT_MAX_FILES})
   --max-bytes <n>        Max source bytes supplied to Qwen (default: ${DEFAULT_MAX_SOURCE_BYTES})
+  --repair-existing      Skip Qwen; repair/validate the existing --spec JSON
   --no-deliver           Generate + validate JSON only
   --help                 Show this help
 
 Examples:
   node scripts/qwen-diagram.mjs --repo C:\\AI\\my-app --type architecture --prompt "Show API, workers, databases and external services"
   node scripts/qwen-diagram.mjs --repo C:\\AI\\my-app --files src/api.ts,src/worker.ts --type sequence --prompt "Trace POST /jobs from request to completion"
+  node scripts/qwen-diagram.mjs --repo C:\\AI\\my-app --type architecture --repair-existing --spec C:\\AI\\my-app-architecture.json --output C:\\AI\\my-app-architecture.html
 `);
   process.exit(exitCode);
 }
@@ -50,6 +52,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') usage(0);
     if (arg === '--no-deliver') { out.deliver = false; continue; }
+    if (arg === '--repair-existing') { out.repairExisting = true; continue; }
     const next = argv[i + 1];
     if (!next || next.startsWith('--')) throw new Error(`Missing value for ${arg}`);
     if (arg === '--repo') out.repo = next;
@@ -66,7 +69,7 @@ function parseArgs(argv) {
     i += 1;
   }
   if (!out.repo) throw new Error('--repo is required');
-  if (!out.prompt) throw new Error('--prompt is required');
+  if (!out.repairExisting && !out.prompt) throw new Error('--prompt is required unless --repair-existing is used');
   if (!TYPES.has(out.type)) throw new Error(`Unsupported --type: ${out.type}`);
   out.baseUrl ||= DEFAULT_BASE_URL;
   out.model ||= DEFAULT_MODEL;
@@ -384,10 +387,37 @@ function parseReceipt(stdout) {
   }
 }
 
-function applyArchitectureLabelRepairs(spec, diagnostics = []) {
+function findArchitectureConnection(spec, diagnostic, fallbackLabel) {
+  if (!Array.isArray(spec?.connections)) return null;
+  const subject = diagnostic?.subject || {};
+
+  if (subject.id) {
+    const byId = spec.connections.find((connection) => connection?.id === subject.id);
+    if (byId) return byId;
+  }
+  if (Number.isInteger(subject.index) && spec.connections[subject.index]) {
+    return spec.connections[subject.index];
+  }
+  if (fallbackLabel) {
+    const matches = spec.connections.filter((connection) => connection?.label === fallbackLabel);
+    if (matches.length === 1) return matches[0];
+  }
+  return null;
+}
+
+function setConnectionLabelAt(connection, labelAt) {
+  connection.labelAt = labelAt.map((value) => Math.round(value * 10) / 10);
+  delete connection.labelDx;
+  delete connection.labelDy;
+  delete connection.labelSegment;
+}
+
+function applyArchitectureRepairs(spec, diagnostics = []) {
   if (!Array.isArray(spec?.connections)) return 0;
   let repaired = 0;
+  const touchedConnections = new Set();
 
+  // Highest confidence: use the validator's exact suggested labelAt.
   for (const diagnostic of diagnostics) {
     if (diagnostic?.code !== 'layout/constraint') continue;
     const message = diagnostic?.message || '';
@@ -396,24 +426,67 @@ function applyArchitectureLabelRepairs(spec, diagnostics = []) {
     if (!labelMatch || !pointMatch) continue;
 
     const label = labelMatch[1];
-    const relationshipId = diagnostic?.subject?.relationship;
-    let candidates = [];
-    if (relationshipId) {
-      candidates = spec.connections.filter((connection) => connection?.id === relationshipId);
-    }
-    if (!candidates.length) {
-      candidates = spec.connections.filter((connection) => connection?.label === label);
-    }
-    if (candidates.length !== 1) continue;
+    const connection = findArchitectureConnection(spec, diagnostic, label);
+    if (!connection || touchedConnections.has(connection)) continue;
 
-    const connection = candidates[0];
     const labelAt = [Number(pointMatch[1]), Number(pointMatch[2])];
-    connection.labelAt = labelAt;
-    delete connection.labelDx;
-    delete connection.labelDy;
-    delete connection.labelSegment;
+    setConnectionLabelAt(connection, labelAt);
+    touchedConnections.add(connection);
     repaired += 1;
-    console.log(`Layout repair: moved label "${label}" to [${labelAt.join(', ')}].`);
+    console.log(`Layout repair: moved label "${label}" to [${labelAt.join(', ')}] using validator suggestion.`);
+  }
+
+  // Showcase label-to-route clearance has structured geometry evidence.
+  for (const diagnostic of diagnostics) {
+    if (diagnostic?.code !== 'composition/label-route-clearance') continue;
+    const evidence = diagnostic?.evidence || {};
+    const label = evidence.label || '';
+    const connection = findArchitectureConnection(spec, diagnostic, label);
+    if (!connection || touchedConnections.has(connection)) continue;
+
+    const rect = evidence.labelRect;
+    const from = evidence.from;
+    const to = evidence.to;
+    if (!rect || !Array.isArray(from) || !Array.isArray(to)
+        || ![rect.x, rect.y, rect.width, rect.height, ...from, ...to].every(Number.isFinite)) continue;
+
+    const current = [rect.x + rect.width / 2, rect.y + 10];
+    const threshold = Number.isFinite(evidence.minimumPx) ? evidence.minimumPx : 4;
+    const padding = threshold + 8;
+    const dx = Math.abs(to[0] - from[0]);
+    const dy = Math.abs(to[1] - from[1]);
+    let labelAt;
+
+    if (dy > dx * 2) {
+      const routeX = from[0];
+      const direction = current[0] >= routeX ? 1 : -1;
+      labelAt = [routeX + direction * (rect.width / 2 + padding), current[1]];
+    } else if (dx > dy * 2) {
+      const routeY = from[1];
+      const direction = current[1] >= routeY ? 1 : -1;
+      labelAt = [current[0], routeY + direction * (rect.height + padding)];
+    } else {
+      continue;
+    }
+
+    setConnectionLabelAt(connection, labelAt);
+    touchedConnections.add(connection);
+    repaired += 1;
+    console.log(`Layout repair: moved label "${label || connection.label || connection.id || '<unnamed>'}" away from a conflicting route to [${connection.labelAt.join(', ')}].`);
+  }
+
+  // An explicit undersized viewBox defeats Archify's built-in auto-fit. If the
+  // validator reports overflow, remove only that authored bound and let the
+  // renderer compute a viewBox from the actual components/boundaries.
+  const outsideViewBox = diagnostics.some((diagnostic) =>
+    diagnostic?.code === 'layout/constraint'
+    && /outside the viewBox/i.test(diagnostic?.message || '')
+  );
+  if (outsideViewBox && Array.isArray(spec?.meta?.viewBox)) {
+    const old = spec.meta.viewBox;
+    delete spec.meta.viewBox;
+    repaired += 1;
+    console.log(`Layout repair: removed undersized viewBox ${old.join('x')} so Archify can auto-fit the diagram.`);
   }
 
   return repaired;
@@ -440,7 +513,7 @@ async function validateWithRepairs({ type, spec, specPath, repoRootArgs, archify
 
     const receipt = parseReceipt(result.stdout);
     const repairs = type === 'architecture'
-      ? applyArchitectureLabelRepairs(spec, receipt?.diagnostics)
+      ? applyArchitectureRepairs(spec, receipt?.diagnostics)
       : 0;
 
     if (repairs > 0 && round < MAX_LAYOUT_REPAIR_ROUNDS) {
@@ -457,8 +530,60 @@ async function validateWithRepairs({ type, spec, specPath, repoRootArgs, archify
   throw new Error(`Archify validation still failed after ${MAX_LAYOUT_REPAIR_ROUNDS} auto-repair rounds.`);
 }
 
+async function repairExistingSpec(args) {
+  const repoRoot = path.resolve(args.repo);
+  const ctx = await readArchifyContext(args.type);
+  if (!(await exists(args.spec))) throw new Error(`Existing spec not found: ${args.spec}`);
+
+  let spec;
+  try {
+    spec = JSON.parse(await fs.readFile(args.spec, 'utf8'));
+  } catch (error) {
+    throw new Error(`Could not read existing spec ${args.spec}: ${error.message}`);
+  }
+  if (spec?.diagram_type && spec.diagram_type !== args.type) {
+    throw new Error(`Existing spec diagram_type is "${spec.diagram_type}", but --type is "${args.type}".`);
+  }
+
+  const repositoryEvidence = args.type === 'architecture' ? await readRepositoryEvidence(repoRoot) : null;
+  if (repositoryEvidence) {
+    spec.meta ||= {};
+    spec.meta.repository = repositoryEvidence.meta;
+    const evidenceResult = await sanitizeArchitectureEvidence(
+      spec,
+      repoRoot,
+      repositoryEvidence.meta.revision
+    );
+    if (evidenceResult.repaired || evidenceResult.dropped) {
+      console.log(`Repository evidence normalized: ${evidenceResult.repaired} repaired, ${evidenceResult.dropped} dropped.`);
+    }
+  }
+
+  await fs.writeFile(args.spec, JSON.stringify(spec, null, 2) + '\n', 'utf8');
+  console.log(`Repairing existing spec ${args.spec} without calling Qwen.`);
+
+  const repoRootArgs = repositoryEvidence ? ['--repo-root', repoRoot] : [];
+  await validateWithRepairs({
+    type: args.type,
+    spec,
+    specPath: args.spec,
+    repoRootArgs,
+    archifyRoot: ctx.archifyRoot
+  });
+
+  if (args.deliver) {
+    await runNode(['bin/archify.mjs', 'deliver', args.type, path.resolve(args.spec), path.resolve(args.output), '--quality', 'showcase', '--json', ...repoRootArgs], ctx.archifyRoot);
+    console.log(`Wrote ${args.output}`);
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.repairExisting) {
+    await repairExistingSpec(args);
+    return;
+  }
+
   const sources = await collectSources(args.repo, args.files, args.maxFiles, args.maxBytes);
   const repositoryEvidence = args.type === 'architecture' ? await readRepositoryEvidence(sources.root) : null;
   const ctx = await readArchifyContext(args.type);

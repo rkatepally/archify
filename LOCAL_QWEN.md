@@ -265,3 +265,30 @@ Layout auto-repair round 1: applied 2 fix(es), revalidating...
 ```
 
 The repair changes geometry only; it does not change component names, source evidence, or architecture semantics. Diagnostics without a deterministic validator-supplied position are still reported rather than guessed.
+
+
+## Repair an existing JSON without rerunning Qwen
+
+If Qwen already generated a useful JSON specification and only Archify geometry validation failed, reuse that file instead of paying the inference cost again:
+
+```powershell
+Set-Location C:\AI\archify\archify
+
+npm run qwen:diagram -- `
+  --repo C:\AI\qanda-yt `
+  --type architecture `
+  --repair-existing `
+  --spec C:\AI\qanda-yt-architecture.json `
+  --output C:\AI\qanda-yt-architecture.html
+```
+
+`--repair-existing` does not call Qwen. It re-verifies repository evidence, applies supported deterministic geometry repairs, validates the JSON, and delivers the HTML when validation succeeds.
+
+Current automatic architecture repairs include:
+
+- exact validator-suggested `labelAt [x,y]` moves for labels overlapping components;
+- label-to-route clearance moves derived from Archify's structured geometry evidence;
+- removal of an undersized explicit `meta.viewBox`, allowing Archify's built-in auto-fit to size the canvas;
+- pinned source-file/path and line-range evidence normalization.
+
+The repair loop remains bounded to three rounds and stops rather than guessing when a diagnostic does not provide enough deterministic evidence.
