@@ -528,6 +528,147 @@ function applyArchitectureRepairs(spec, diagnostics = []) {
     );
   }
 
+  // A relationship crossing an unrelated component is a semantic failure.
+  // For free-position architecture specs, route deterministically around the
+  // named obstacle using a short orthogonal corridor that clears every other
+  // unrelated component. The renderer remains authoritative on the next pass.
+  const componentBox = (id) => {
+    const component = Array.isArray(spec?.components)
+      ? spec.components.find((entry) => entry?.id === id)
+      : null;
+    if (!component || !Array.isArray(component.pos) || component.pos.length !== 2) return null;
+    const size = Array.isArray(component.size) && component.size.length === 2
+      ? component.size
+      : [120, 60];
+    if (![...component.pos, ...size].every(Number.isFinite)) return null;
+    return {
+      id,
+      x: component.pos[0],
+      y: component.pos[1],
+      width: size[0],
+      height: size[1],
+      cx: component.pos[0] + size[0] / 2,
+      cy: component.pos[1] + size[1] / 2
+    };
+  };
+
+  const segmentHitsBox = (a, b, box, clearance = 4) => {
+    const left = box.x - clearance;
+    const right = box.x + box.width + clearance;
+    const top = box.y - clearance;
+    const bottom = box.y + box.height + clearance;
+    if (Math.abs(a[0] - b[0]) < 0.001) {
+      const x = a[0];
+      const low = Math.min(a[1], b[1]);
+      const high = Math.max(a[1], b[1]);
+      return x >= left && x <= right && high >= top && low <= bottom;
+    }
+    if (Math.abs(a[1] - b[1]) < 0.001) {
+      const y = a[1];
+      const low = Math.min(a[0], b[0]);
+      const high = Math.max(a[0], b[0]);
+      return y >= top && y <= bottom && high >= left && low <= right;
+    }
+    return false;
+  };
+
+  const routeClearsComponents = (points, sourceId, targetId) => {
+    if (!Array.isArray(spec?.components)) return false;
+    for (const component of spec.components) {
+      if (!component?.id || component.id === sourceId || component.id === targetId) continue;
+      const box = componentBox(component.id);
+      if (!box) continue;
+      for (let index = 0; index < points.length - 1; index += 1) {
+        if (segmentHitsBox(points[index], points[index + 1], box, 4)) return false;
+      }
+    }
+    return true;
+  };
+
+  for (const diagnostic of diagnostics) {
+    if (diagnostic?.code !== 'clean-flow/edge-through-node') continue;
+    const connection = findArchitectureConnectionFromSubject(spec, diagnostic?.subject || {});
+    const obstacle = componentBox(diagnostic?.evidence?.obstacleId);
+    const source = connection ? componentBox(connection.from) : null;
+    const target = connection ? componentBox(connection.to) : null;
+    if (!connection || !obstacle || !source || !target || touchedConnections.has(connection)) continue;
+
+    const gap = 24;
+    const candidates = [
+      {
+        name: 'left',
+        fromSide: 'left',
+        toSide: 'left',
+        points: [
+          [source.x, source.cy],
+          [obstacle.x - gap, source.cy],
+          [obstacle.x - gap, target.cy],
+          [target.x, target.cy]
+        ],
+        via: [[obstacle.x - gap, source.cy], [obstacle.x - gap, target.cy]]
+      },
+      {
+        name: 'right',
+        fromSide: 'right',
+        toSide: 'right',
+        points: [
+          [source.x + source.width, source.cy],
+          [obstacle.x + obstacle.width + gap, source.cy],
+          [obstacle.x + obstacle.width + gap, target.cy],
+          [target.x + target.width, target.cy]
+        ],
+        via: [[obstacle.x + obstacle.width + gap, source.cy], [obstacle.x + obstacle.width + gap, target.cy]]
+      },
+      {
+        name: 'top',
+        fromSide: 'top',
+        toSide: 'top',
+        points: [
+          [source.cx, source.y],
+          [source.cx, obstacle.y - gap],
+          [target.cx, obstacle.y - gap],
+          [target.cx, target.y]
+        ],
+        via: [[source.cx, obstacle.y - gap], [target.cx, obstacle.y - gap]]
+      },
+      {
+        name: 'bottom',
+        fromSide: 'bottom',
+        toSide: 'bottom',
+        points: [
+          [source.cx, source.y + source.height],
+          [source.cx, obstacle.y + obstacle.height + gap],
+          [target.cx, obstacle.y + obstacle.height + gap],
+          [target.cx, target.y + target.height]
+        ],
+        via: [[source.cx, obstacle.y + obstacle.height + gap], [target.cx, obstacle.y + obstacle.height + gap]]
+      }
+    ].filter((candidate) => routeClearsComponents(candidate.points, connection.from, connection.to));
+
+    if (!candidates.length) continue;
+    candidates.sort((left, right) => {
+      const routeLength = (candidate) => candidate.points.slice(0, -1).reduce(
+        (sum, point, index) => sum
+          + Math.abs(candidate.points[index + 1][0] - point[0])
+          + Math.abs(candidate.points[index + 1][1] - point[1]),
+        0
+      );
+      return routeLength(left) - routeLength(right);
+    });
+
+    const chosen = candidates[0];
+    connection.fromSide = chosen.fromSide;
+    connection.toSide = chosen.toSide;
+    connection.via = chosen.via;
+    delete connection.route;
+    touchedConnections.add(connection);
+    repaired += 1;
+    console.log(
+      `Layout repair: routed "${connection.id || connection.label || `${connection.from}->${connection.to}`}" `
+      + `around component "${obstacle.id}" via the ${chosen.name} corridor.`
+    );
+  }
+
   // An explicit undersized viewBox defeats Archify's built-in auto-fit. If the
   // validator reports overflow, remove only that authored bound and let the
   // renderer compute a viewBox from the actual components/boundaries.
