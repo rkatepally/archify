@@ -36,8 +36,8 @@ If you already cloned the repo:
 
 ```powershell
 Set-Location C:\AI\archify
-git pull
-git checkout local-qwen-diagrams
+git checkout main
+git pull origin main
 Set-Location .\archify
 npm install
 ```
@@ -61,6 +61,8 @@ Result:
 
 - `C:\AI\qanda-yt-architecture.json` - Qwen-generated Archify specification
 - `C:\AI\qanda-yt-architecture.html` - validated standalone diagram
+
+For architecture diagrams, the script now reads the target repository's `remote.origin.url` and full Git `HEAD` revision, injects those values into `meta.repository`, and passes `--repo-root` to Archify validation and delivery. This is required when Qwen attaches `components[].sources` evidence.
 
 Open the HTML file in a browser.
 
@@ -205,3 +207,33 @@ Rules:
 4. Writes the JSON, runs `archify validate`, then runs `archify deliver` to create the standalone HTML.
 
 The existing Archify renderer remains unchanged. Qwen is used only as the code-understanding and JSON-authoring layer.
+
+
+## Troubleshooting repository evidence
+
+If an older version fails validation with a message similar to:
+
+```text
+add the pinned repository metadata or remove component sources
+```
+
+update Archify first:
+
+```powershell
+Set-Location C:\AI\archify
+git checkout main
+git pull origin main
+Set-Location .\archify
+```
+
+Then confirm the repository you are diagramming is a Git checkout with an origin and a commit:
+
+```powershell
+Set-Location C:\AI\qanda-yt
+git remote get-url origin
+git rev-parse HEAD
+```
+
+The revision should be a 40-character commit SHA. The Qwen driver uses these values automatically; you do not need to add `meta.repository` by hand.
+
+If the target repository has uncommitted changes, the command prints a warning because Qwen reads the working tree while Archify source links are pinned to the current `HEAD` commit.
