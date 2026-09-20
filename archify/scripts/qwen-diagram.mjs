@@ -8,7 +8,7 @@ const DEFAULT_BASE_URL = process.env.QWEN_BASE_URL || 'http://127.0.0.1:8081/v1'
 const DEFAULT_MODEL = process.env.QWEN_MODEL || 'qwen38-code';
 const DEFAULT_MAX_SOURCE_BYTES = 100000;
 const DEFAULT_MAX_FILES = 40;
-const MAX_LAYOUT_REPAIR_ROUNDS = 5;
+const MAX_LAYOUT_REPAIR_ROUNDS = 7;
 const TYPES = new Set(['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle']);
 const SOURCE_EXTENSIONS = new Set([
   '.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.java', '.cs', '.go', '.rs', '.rb', '.php',
@@ -584,6 +584,191 @@ function applyArchitectureRepairs(spec, diagnostics = []) {
     }
     return true;
   };
+
+  const sideVector = {
+    left: [-1, 0],
+    right: [1, 0],
+    top: [0, -1],
+    bottom: [0, 1]
+  };
+
+  const sideAnchor = (box, side) => {
+    if (side === 'left') return [box.x, box.cy];
+    if (side === 'right') return [box.x + box.width, box.cy];
+    if (side === 'top') return [box.cx, box.y];
+    return [box.cx, box.y + box.height];
+  };
+
+  const normalizePoints = (points) => {
+    const deduped = [];
+    for (const point of points) {
+      const previous = deduped.at(-1);
+      if (!previous || Math.abs(previous[0] - point[0]) > 0.001 || Math.abs(previous[1] - point[1]) > 0.001) {
+        deduped.push(point);
+      }
+    }
+    const normalized = [];
+    for (const point of deduped) {
+      while (normalized.length >= 2) {
+        const a = normalized.at(-2);
+        const b = normalized.at(-1);
+        const sameX = Math.abs(a[0] - b[0]) < 0.001 && Math.abs(b[0] - point[0]) < 0.001;
+        const sameY = Math.abs(a[1] - b[1]) < 0.001 && Math.abs(b[1] - point[1]) < 0.001;
+        if (!sameX && !sameY) break;
+        normalized.pop();
+      }
+      normalized.push(point);
+    }
+    return normalized;
+  };
+
+  const routeLength = (points) => points.slice(0, -1).reduce(
+    (sum, point, index) => sum
+      + Math.abs(points[index + 1][0] - point[0])
+      + Math.abs(points[index + 1][1] - point[1]),
+    0
+  );
+
+  const pointSegmentDistance = (point, start, end) => {
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared < 0.000001) return Math.hypot(point[0] - start[0], point[1] - start[1]);
+    const t = Math.max(0, Math.min(1,
+      ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / lengthSquared
+    ));
+    return Math.hypot(
+      point[0] - (start[0] + t * dx),
+      point[1] - (start[1] + t * dy)
+    );
+  };
+
+  const routeAvoidsPoint = (points, point, clearance = 12) => {
+    if (!Array.isArray(point) || point.length !== 2 || !point.every(Number.isFinite)) return true;
+    for (let index = 0; index < points.length - 1; index += 1) {
+      if (pointSegmentDistance(point, points[index], points[index + 1]) < clearance) return false;
+    }
+    return true;
+  };
+
+  const candidateLanes = () => {
+    const boxes = (Array.isArray(spec?.components) ? spec.components : [])
+      .map((component) => componentBox(component?.id))
+      .filter(Boolean);
+    const gap = 24;
+    const xs = new Set();
+    const ys = new Set();
+    for (const box of boxes) {
+      xs.add(box.x - gap);
+      xs.add(box.x + box.width + gap);
+      ys.add(box.y - gap);
+      ys.add(box.y + box.height + gap);
+    }
+    const sortedX = [...boxes].sort((a, b) => a.x - b.x);
+    const sortedY = [...boxes].sort((a, b) => a.y - b.y);
+    for (let i = 0; i < sortedX.length - 1; i += 1) {
+      const leftEdge = sortedX[i].x + sortedX[i].width;
+      const rightEdge = sortedX[i + 1].x;
+      if (rightEdge - leftEdge >= gap * 2) xs.add((leftEdge + rightEdge) / 2);
+    }
+    for (let i = 0; i < sortedY.length - 1; i += 1) {
+      const topEdge = sortedY[i].y + sortedY[i].height;
+      const bottomEdge = sortedY[i + 1].y;
+      if (bottomEdge - topEdge >= gap * 2) ys.add((topEdge + bottomEdge) / 2);
+    }
+    return { xs: [...xs], ys: [...ys] };
+  };
+
+  const findCrossingDetour = (connection, crossingPoint) => {
+    const source = componentBox(connection?.from);
+    const target = componentBox(connection?.to);
+    if (!source || !target) return null;
+
+    const { xs, ys } = candidateLanes();
+    const sides = ['left', 'right', 'top', 'bottom'];
+    const stub = 24;
+    const candidates = [];
+
+    for (const fromSide of sides) {
+      for (const toSide of sides) {
+        const start = sideAnchor(source, fromSide);
+        const end = sideAnchor(target, toSide);
+        const fromVector = sideVector[fromSide];
+        const toVector = sideVector[toSide];
+        const startStub = [start[0] + fromVector[0] * stub, start[1] + fromVector[1] * stub];
+        const endStub = [end[0] + toVector[0] * stub, end[1] + toVector[1] * stub];
+
+        const raw = [
+          [start, startStub, [endStub[0], startStub[1]], endStub, end],
+          [start, startStub, [startStub[0], endStub[1]], endStub, end],
+          ...xs.map((x) => [start, startStub, [x, startStub[1]], [x, endStub[1]], endStub, end]),
+          ...ys.map((y) => [start, startStub, [startStub[0], y], [endStub[0], y], endStub, end])
+        ];
+
+        for (const points of raw) {
+          const normalized = normalizePoints(points);
+          if (normalized.length < 2) continue;
+          if (!routeClearsComponents(normalized, connection.from, connection.to)) continue;
+          if (!routeAvoidsPoint(normalized, crossingPoint, 12)) continue;
+
+          let rhythmOk = true;
+          for (let index = 0; index < normalized.length - 1; index += 1) {
+            const length = Math.abs(normalized[index + 1][0] - normalized[index][0])
+              + Math.abs(normalized[index + 1][1] - normalized[index][1]);
+            if (length > 0.001 && length < 16) {
+              rhythmOk = false;
+              break;
+            }
+          }
+          if (!rhythmOk) continue;
+
+          candidates.push({
+            fromSide,
+            toSide,
+            points: normalized,
+            via: normalized.slice(1, -1),
+            length: routeLength(normalized)
+          });
+        }
+      }
+    }
+
+    candidates.sort((a, b) => a.length - b.length || a.via.length - b.via.length);
+    return candidates[0] || null;
+  };
+
+  // Proper X-crossings between unrelated relationships need a real lane
+  // change, not merely a label move. Search obstacle-free orthogonal lanes
+  // for either relationship, exclude the reported crossing point, and choose
+  // the shortest deterministic detour. The validator checks the result again.
+  for (const diagnostic of diagnostics) {
+    if (diagnostic?.code !== 'composition/proper-crossing') continue;
+    const evidence = diagnostic?.evidence || {};
+    const crossingPoint = evidence.point;
+    const primary = findArchitectureConnectionFromSubject(spec, diagnostic?.subject || {});
+    const secondary = findArchitectureConnectionFromSubject(spec, evidence.otherRelationship || {});
+
+    const options = [primary, secondary]
+      .filter(Boolean)
+      .filter((connection) => !touchedConnections.has(connection))
+      .map((connection) => ({ connection, detour: findCrossingDetour(connection, crossingPoint) }))
+      .filter((entry) => entry.detour);
+
+    if (!options.length) continue;
+    options.sort((a, b) => a.detour.length - b.detour.length || a.detour.via.length - b.detour.via.length);
+    const { connection, detour } = options[0];
+
+    connection.fromSide = detour.fromSide;
+    connection.toSide = detour.toSide;
+    connection.via = detour.via;
+    delete connection.route;
+    touchedConnections.add(connection);
+    repaired += 1;
+    console.log(
+      `Layout repair: rerouted "${connection.id || connection.label || `${connection.from}->${connection.to}`}" `
+      + `around proper crossing at [${crossingPoint.join(', ')}] using an obstacle-free orthogonal lane.`
+    );
+  }
 
   for (const diagnostic of diagnostics) {
     if (diagnostic?.code !== 'clean-flow/edge-through-node') continue;
