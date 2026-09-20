@@ -8,7 +8,7 @@ const DEFAULT_BASE_URL = process.env.QWEN_BASE_URL || 'http://127.0.0.1:8081/v1'
 const DEFAULT_MODEL = process.env.QWEN_MODEL || 'qwen38-code';
 const DEFAULT_MAX_SOURCE_BYTES = 100000;
 const DEFAULT_MAX_FILES = 40;
-const MAX_LAYOUT_REPAIR_ROUNDS = 3;
+const MAX_LAYOUT_REPAIR_ROUNDS = 5;
 const TYPES = new Set(['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle']);
 const SOURCE_EXTENSIONS = new Set([
   '.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.java', '.cs', '.go', '.rs', '.rb', '.php',
@@ -387,10 +387,8 @@ function parseReceipt(stdout) {
   }
 }
 
-function findArchitectureConnection(spec, diagnostic, fallbackLabel) {
+function findArchitectureConnectionFromSubject(spec, subject = {}) {
   if (!Array.isArray(spec?.connections)) return null;
-  const subject = diagnostic?.subject || {};
-
   if (subject.id) {
     const byId = spec.connections.find((connection) => connection?.id === subject.id);
     if (byId) return byId;
@@ -398,6 +396,18 @@ function findArchitectureConnection(spec, diagnostic, fallbackLabel) {
   if (Number.isInteger(subject.index) && spec.connections[subject.index]) {
     return spec.connections[subject.index];
   }
+  if (subject.from && subject.to) {
+    const matches = spec.connections.filter((connection) =>
+      connection?.from === subject.from && connection?.to === subject.to
+    );
+    if (matches.length === 1) return matches[0];
+  }
+  return null;
+}
+
+function findArchitectureConnection(spec, diagnostic, fallbackLabel) {
+  const bySubject = findArchitectureConnectionFromSubject(spec, diagnostic?.subject || {});
+  if (bySubject) return bySubject;
   if (fallbackLabel) {
     const matches = spec.connections.filter((connection) => connection?.label === fallbackLabel);
     if (matches.length === 1) return matches[0];
@@ -473,6 +483,49 @@ function applyArchitectureRepairs(spec, diagnostics = []) {
     touchedConnections.add(connection);
     repaired += 1;
     console.log(`Layout repair: moved label "${label || connection.label || connection.id || '<unnamed>'}" away from a conflicting route to [${connection.labelAt.join(', ')}].`);
+  }
+
+  // Unrelated connections sharing a collinear corridor are ambiguous in
+  // showcase mode. The diagnostic includes the overlap axis plus both
+  // relationships. Re-route one relationship through the perpendicular
+  // orthogonal family and let the next validation round verify it.
+  for (const diagnostic of diagnostics) {
+    if (diagnostic?.code !== 'composition/ambiguous-corridor') continue;
+    const evidence = diagnostic?.evidence || {};
+    const from = evidence.from;
+    const to = evidence.to;
+    if (!Array.isArray(from) || !Array.isArray(to)
+        || from.length !== 2 || to.length !== 2
+        || ![...from, ...to].every(Number.isFinite)) continue;
+
+    const primary = findArchitectureConnectionFromSubject(spec, diagnostic?.subject || {});
+    const secondary = findArchitectureConnectionFromSubject(spec, evidence.otherRelationship || {});
+    const verticalOverlap = Math.abs(from[0] - to[0]) < 0.001;
+    const horizontalOverlap = Math.abs(from[1] - to[1]) < 0.001;
+    if (!verticalOverlap && !horizontalOverlap) continue;
+
+    // orthogonal-v has a horizontal middle corridor; orthogonal-h has a
+    // vertical middle corridor. Choose the family perpendicular to the
+    // offending overlap.
+    const preferredRoute = verticalOverlap ? 'orthogonal-v' : 'orthogonal-h';
+    const candidates = [primary, secondary].filter(Boolean);
+    const target = candidates.find((connection) =>
+      !touchedConnections.has(connection)
+      && (connection.route !== preferredRoute || Array.isArray(connection.via)
+          || connection.fromSide || connection.toSide)
+    );
+    if (!target) continue;
+
+    target.route = preferredRoute;
+    delete target.via;
+    delete target.fromSide;
+    delete target.toSide;
+    touchedConnections.add(target);
+    repaired += 1;
+    console.log(
+      `Layout repair: rerouted "${target.id || target.label || `${target.from}->${target.to}`}" `
+      + `with ${preferredRoute} to separate a shared ${verticalOverlap ? 'vertical' : 'horizontal'} corridor.`
+    );
   }
 
   // An explicit undersized viewBox defeats Archify's built-in auto-fit. If the
