@@ -6,8 +6,9 @@ import { execFile, spawn } from 'node:child_process';
 
 const DEFAULT_BASE_URL = process.env.QWEN_BASE_URL || 'http://127.0.0.1:8081/v1';
 const DEFAULT_MODEL = process.env.QWEN_MODEL || 'qwen38-code';
-const DEFAULT_MAX_SOURCE_BYTES = 180000;
-const DEFAULT_MAX_FILES = 80;
+const DEFAULT_MAX_SOURCE_BYTES = 100000;
+const DEFAULT_MAX_FILES = 40;
+const MAX_LAYOUT_REPAIR_ROUNDS = 3;
 const TYPES = new Set(['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle']);
 const SOURCE_EXTENSIONS = new Set([
   '.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.java', '.cs', '.go', '.rs', '.rb', '.php',
@@ -358,6 +359,104 @@ function runNode(args, cwd) {
   });
 }
 
+function runNodeCapture(args, cwd) {
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      args,
+      { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        resolve({
+          code: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
+          stdout: stdout || '',
+          stderr: stderr || ''
+        });
+      }
+    );
+  });
+}
+
+function parseReceipt(stdout) {
+  try {
+    return JSON.parse(stdout.trim());
+  } catch {
+    return null;
+  }
+}
+
+function applyArchitectureLabelRepairs(spec, diagnostics = []) {
+  if (!Array.isArray(spec?.connections)) return 0;
+  let repaired = 0;
+
+  for (const diagnostic of diagnostics) {
+    if (diagnostic?.code !== 'layout/constraint') continue;
+    const message = diagnostic?.message || '';
+    const labelMatch = message.match(/Label\s+"([^"]+)"/i);
+    const pointMatch = message.match(/Suggested fix:\s*labelAt\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/i);
+    if (!labelMatch || !pointMatch) continue;
+
+    const label = labelMatch[1];
+    const relationshipId = diagnostic?.subject?.relationship;
+    let candidates = [];
+    if (relationshipId) {
+      candidates = spec.connections.filter((connection) => connection?.id === relationshipId);
+    }
+    if (!candidates.length) {
+      candidates = spec.connections.filter((connection) => connection?.label === label);
+    }
+    if (candidates.length !== 1) continue;
+
+    const connection = candidates[0];
+    const labelAt = [Number(pointMatch[1]), Number(pointMatch[2])];
+    connection.labelAt = labelAt;
+    delete connection.labelDx;
+    delete connection.labelDy;
+    delete connection.labelSegment;
+    repaired += 1;
+    console.log(`Layout repair: moved label "${label}" to [${labelAt.join(', ')}].`);
+  }
+
+  return repaired;
+}
+
+async function validateWithRepairs({ type, spec, specPath, repoRootArgs, archifyRoot }) {
+  const validationArgs = [
+    'bin/archify.mjs',
+    'validate',
+    type,
+    path.resolve(specPath),
+    '--quality',
+    'showcase',
+    '--json',
+    ...repoRootArgs
+  ];
+
+  for (let round = 0; round <= MAX_LAYOUT_REPAIR_ROUNDS; round += 1) {
+    const result = await runNodeCapture(validationArgs, archifyRoot);
+    if (result.code === 0) {
+      if (result.stdout.trim()) process.stdout.write(result.stdout.endsWith('\n') ? result.stdout : `${result.stdout}\n`);
+      return;
+    }
+
+    const receipt = parseReceipt(result.stdout);
+    const repairs = type === 'architecture'
+      ? applyArchitectureLabelRepairs(spec, receipt?.diagnostics)
+      : 0;
+
+    if (repairs > 0 && round < MAX_LAYOUT_REPAIR_ROUNDS) {
+      await fs.writeFile(specPath, JSON.stringify(spec, null, 2) + '\n', 'utf8');
+      console.log(`Layout auto-repair round ${round + 1}: applied ${repairs} fix(es), revalidating...`);
+      continue;
+    }
+
+    if (result.stderr.trim()) process.stderr.write(result.stderr.endsWith('\n') ? result.stderr : `${result.stderr}\n`);
+    if (result.stdout.trim()) process.stdout.write(result.stdout.endsWith('\n') ? result.stdout : `${result.stdout}\n`);
+    throw new Error(`Archify validation failed after ${round} auto-repair round(s).`);
+  }
+
+  throw new Error(`Archify validation still failed after ${MAX_LAYOUT_REPAIR_ROUNDS} auto-repair rounds.`);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sources = await collectSources(args.repo, args.files, args.maxFiles, args.maxBytes);
@@ -400,7 +499,13 @@ async function main() {
   console.log(`Wrote ${args.spec}`);
 
   const repoRootArgs = repositoryEvidence ? ['--repo-root', sources.root] : [];
-  await runNode(['bin/archify.mjs', 'validate', args.type, path.resolve(args.spec), '--quality', 'showcase', '--json', ...repoRootArgs], ctx.archifyRoot);
+  await validateWithRepairs({
+    type: args.type,
+    spec,
+    specPath: args.spec,
+    repoRootArgs,
+    archifyRoot: ctx.archifyRoot
+  });
   if (args.deliver) {
     await runNode(['bin/archify.mjs', 'deliver', args.type, path.resolve(args.spec), path.resolve(args.output), '--quality', 'showcase', '--json', ...repoRootArgs], ctx.archifyRoot);
     console.log(`Wrote ${args.output}`);
