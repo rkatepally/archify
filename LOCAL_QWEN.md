@@ -299,3 +299,10 @@ The repair loop remains bounded to three rounds and stops rather than guessing w
 Showcase validation rejects unrelated connections that visually merge by sharing the same horizontal or vertical corridor. The repair loop now detects `composition/ambiguous-corridor` diagnostics and reroutes one of the two relationships through the perpendicular orthogonal route family, then validates the result again.
 
 For example, a shared vertical segment is changed to an `orthogonal-v` route (horizontal middle corridor); a shared horizontal segment is changed to `orthogonal-h`. Explicit `via` and endpoint-side overrides on the repaired connection are cleared so the renderer can recompute a clean route. The validator remains authoritative: if the new route creates a different geometry violation, another bounded repair round runs or the command stops with that diagnostic.
+
+
+### Edges crossing unrelated components
+
+Architecture validation also rejects a connection that passes through an unrelated component (`clean-flow/edge-through-node`). The repair loop now uses the diagnostic's relationship id plus obstacle id, evaluates short left/right/top/bottom orthogonal detours against the free-position component boxes, selects the shortest corridor that clears all unrelated components, writes explicit `fromSide`/`toSide`/`via`, and revalidates.
+
+This is useful for cases such as an LLM-to-storage connection whose direct vertical route passes through a cloud-provider component. The repair changes only route geometry; it does not change the architecture relationship itself.
