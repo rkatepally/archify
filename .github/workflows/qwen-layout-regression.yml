@@ -33,3 +33,12 @@ jobs:
       - name: Qwen layout unit and integration tests
         run: npm run test:qwen-layout
         working-directory: archify
+      - name: Build deterministic package candidate
+        run: scripts/build-zip.sh /tmp/archify-fresh.zip
+      - name: Upload deterministic package candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: archify-fresh-zip
+          path: /tmp/archify-fresh.zip
+          if-no-files-found: error
+          retention-days: 1
