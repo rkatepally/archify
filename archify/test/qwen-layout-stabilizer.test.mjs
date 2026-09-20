@@ -44,6 +44,9 @@ function semantics(spec) {
 test('global stabilizer produces a geometry-clean qanda-yt layout without changing semantics', () => {
   const spec = fixture();
   const before = semantics(spec);
+  const failingGeometry = inspectArchitectureGeometry(spec);
+  assert.equal(failingGeometry.ok, false);
+  assert.ok(failingGeometry.issues.some((issue) => issue.code === 'route-conflict'));
   const result = stabilizeArchitectureLayout(spec);
   assert.equal(result.changed, true, result.reason);
   assert.equal(result.routed, spec.connections.length);
