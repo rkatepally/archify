@@ -306,3 +306,12 @@ For example, a shared vertical segment is changed to an `orthogonal-v` route (ho
 Architecture validation also rejects a connection that passes through an unrelated component (`clean-flow/edge-through-node`). The repair loop now uses the diagnostic's relationship id plus obstacle id, evaluates short left/right/top/bottom orthogonal detours against the free-position component boxes, selects the shortest corridor that clears all unrelated components, writes explicit `fromSide`/`toSide`/`via`, and revalidates.
 
 This is useful for cases such as an LLM-to-storage connection whose direct vertical route passes through a cloud-provider component. The repair changes only route geometry; it does not change the architecture relationship itself.
+
+
+### Proper relationship crossings
+
+Showcase validation also rejects unrelated relationships that form a proper interior X. The repair loop now handles `composition/proper-crossing` diagnostics by using the reported crossing point plus the component geometry to search deterministic orthogonal lanes.
+
+The search tries source/target sides and horizontal/vertical lanes around component edges, rejects candidates that intersect unrelated components or pass back through the reported crossing point, enforces a 16px minimum visible segment, and chooses the shortest remaining route. The repaired relationship is written with explicit `fromSide`, `toSide`, and `via` geometry before the next validation round.
+
+The bounded layout repair loop now allows up to seven rounds because repairing one geometry constraint can reveal another stricter showcase constraint underneath it.
