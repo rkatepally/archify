@@ -745,6 +745,7 @@ function applyArchitectureRepairs(spec, diagnostics = []) {
     if (diagnostic?.code !== 'composition/proper-crossing') continue;
     const evidence = diagnostic?.evidence || {};
     const crossingPoint = evidence.point;
+    if (!Array.isArray(crossingPoint) || crossingPoint.length !== 2 || !crossingPoint.every(Number.isFinite)) continue;
     const primary = findArchitectureConnectionFromSubject(spec, diagnostic?.subject || {});
     const secondary = findArchitectureConnectionFromSubject(spec, evidence.otherRelationship || {});
 
