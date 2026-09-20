@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { stabilizeArchitectureLayout, inspectArchitectureGeometry } from './qwen-layout-stabilizer.mjs';
+import { stabilizeArchitectureLayout, inspectArchitectureGeometry } from '../scripts/qwen-layout-stabilizer.mjs';
 
 function fixture() {
   return {
